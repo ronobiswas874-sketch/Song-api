@@ -1,69 +1,57 @@
-
 from flask import Flask, request, jsonify, send_file, url_for
 import yt_dlp
 import tempfile
 import os
 import uuid
-import shutil
+import imageio_ffmpeg
 
 app = Flask(__name__)
 
-# Temporary storage
+# Temporary directory
 TEMP_DIR = tempfile.mkdtemp(prefix="song_api_")
+
+# File registry
 files = {}
 
 
-def find_ffmpeg():
-    # Check PATH
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
+# ========================================
+# FIND BUNDLED FFMPEG
+# ========================================
 
-    if ffmpeg and ffprobe:
-        return os.path.dirname(ffmpeg)
+try:
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
-    # Windows
-    windows_paths = [
-        r"C:\ffmpeg\bin",
-        r"C:\Program Files\ffmpeg\bin",
-        r"C:\Program Files (x86)\ffmpeg\bin",
-    ]
+    if os.path.isfile(FFMPEG_PATH):
+        FFMPEG_LOCATION = os.path.dirname(FFMPEG_PATH)
+        FFMPEG_AVAILABLE = True
+    else:
+        FFMPEG_LOCATION = None
+        FFMPEG_AVAILABLE = False
 
-    for path in windows_paths:
-        if (
-            os.path.isfile(os.path.join(path, "ffmpeg.exe"))
-            and os.path.isfile(os.path.join(path, "ffprobe.exe"))
-        ):
-            return path
-
-    # Linux / Termux
-    linux_paths = [
-        "/data/data/com.termux/files/usr/bin",
-        "/usr/bin",
-        "/usr/local/bin",
-        "/bin",
-    ]
-
-    for path in linux_paths:
-        if (
-            os.path.isfile(os.path.join(path, "ffmpeg"))
-            and os.path.isfile(os.path.join(path, "ffprobe"))
-        ):
-            return path
-
-    return None
+except Exception:
+    FFMPEG_PATH = None
+    FFMPEG_LOCATION = None
+    FFMPEG_AVAILABLE = False
 
 
-FFMPEG_LOCATION = find_ffmpeg()
-
+# ========================================
+# HOME
+# ========================================
 
 @app.route("/")
 def home():
+
     return jsonify({
         "status": "online",
-        "ffmpeg": bool(FFMPEG_LOCATION),
+        "ffmpeg": FFMPEG_AVAILABLE,
+        "ffmpeg_path": FFMPEG_PATH if FFMPEG_AVAILABLE else None,
         "usage": "/song?name=SONG_NAME"
     })
 
+
+# ========================================
+# SONG
+# ========================================
 
 @app.route("/song")
 def song():
@@ -77,18 +65,16 @@ def song():
             "example": "/song?name=Never Gonna Give You Up"
         }), 400
 
-    # Check FFmpeg
-    if not FFMPEG_LOCATION:
+    if not FFMPEG_AVAILABLE:
         return jsonify({
             "success": False,
-            "error": "FFmpeg not found",
-            "message": "Install FFmpeg and ffprobe first."
+            "error": "FFmpeg not available"
         }), 500
 
     try:
 
         # ========================================
-        # SEARCH YOUTUBE
+        # SEARCH
         # ========================================
 
         search_query = f"ytsearch5:{name}"
@@ -98,9 +84,8 @@ def song():
             "no_warnings": True
         }
 
-        # Do NOT use extract_flat
-        # This allows yt-dlp to return metadata.
         with yt_dlp.YoutubeDL(search_options) as ydl:
+
             info = ydl.extract_info(
                 search_query,
                 download=False
@@ -115,79 +100,86 @@ def song():
         ]
 
         if not entries:
+
             return jsonify({
                 "success": False,
                 "error": "Song not found",
                 "query": name
             }), 404
 
-        # First valid result
         video = entries[0]
 
         video_id = video.get("id")
         title = video.get("title") or name
 
         if not video_id:
+
             return jsonify({
                 "success": False,
-                "error": "YouTube video ID not found"
+                "error": "Video ID not found"
             }), 500
 
         # ========================================
-        # HIGH QUALITY THUMBNAIL
+        # THUMBNAILS
         # ========================================
 
-        # Maximum quality thumbnail
-        thumbnail = (
-            f"https://i.ytimg.com/vi/"
-            f"{video_id}/maxresdefault.jpg"
-        )
-
-        # Additional thumbnail URLs
         thumbnails = {
-            "max": f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
-            "standard": f"https://i.ytimg.com/vi/{video_id}/sddefault.jpg",
-            "high": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-            "medium": f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+            "max": (
+                f"https://i.ytimg.com/vi/"
+                f"{video_id}/maxresdefault.jpg"
+            ),
+            "standard": (
+                f"https://i.ytimg.com/vi/"
+                f"{video_id}/sddefault.jpg"
+            ),
+            "high": (
+                f"https://i.ytimg.com/vi/"
+                f"{video_id}/hqdefault.jpg"
+            ),
+            "medium": (
+                f"https://i.ytimg.com/vi/"
+                f"{video_id}/mqdefault.jpg"
+            )
         }
 
+        thumbnail = thumbnails["max"]
+
         # ========================================
-        # CREATE UNIQUE FILE
+        # FILE ID
         # ========================================
 
         file_id = str(uuid.uuid4())
 
-        filepath = os.path.join(
+        output_template = os.path.join(
+            TEMP_DIR,
+            f"{file_id}.%(ext)s"
+        )
+
+        mp3_path = os.path.join(
             TEMP_DIR,
             f"{file_id}.mp3"
         )
 
         # ========================================
-        # DOWNLOAD AUDIO
+        # DOWNLOAD
         # ========================================
 
-        download_options = {
+        options = {
 
             "format": "bestaudio/best",
 
-            "outtmpl": os.path.join(
-                TEMP_DIR,
-                f"{file_id}.%(ext)s"
-            ),
+            "outtmpl": output_template,
 
             "quiet": True,
             "no_warnings": True,
 
-            # FFmpeg path
-            "ffmpeg_location": FFMPEG_LOCATION,
+            # Exact FFmpeg executable
+            "ffmpeg_location": FFMPEG_PATH,
 
-            # Convert to MP3
             "postprocessors": [
                 {
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": "mp3",
-
-                    # 320 kbps
                     "preferredquality": "320"
                 }
             ]
@@ -197,35 +189,39 @@ def song():
             f"https://www.youtube.com/watch?v={video_id}"
         )
 
-        with yt_dlp.YoutubeDL(download_options) as ydl:
-            ydl.download([video_url])
+        with yt_dlp.YoutubeDL(options) as ydl:
+
+            ydl.download([
+                video_url
+            ])
 
         # ========================================
-        # CHECK MP3
+        # FIND MP3
         # ========================================
 
-        if not os.path.exists(filepath):
+        if not os.path.exists(mp3_path):
 
-            possible_files = [
+            possible = [
                 os.path.join(TEMP_DIR, filename)
                 for filename in os.listdir(TEMP_DIR)
                 if filename.startswith(file_id)
-                and filename.lower().endswith(".mp3")
+                and filename.endswith(".mp3")
             ]
 
-            if not possible_files:
+            if not possible:
+
                 return jsonify({
                     "success": False,
                     "error": "MP3 generation failed"
                 }), 500
 
-            filepath = possible_files[0]
+            mp3_path = possible[0]
 
         # ========================================
-        # SAVE FILE
+        # SAVE
         # ========================================
 
-        files[file_id] = filepath
+        files[file_id] = mp3_path
 
         download_url = url_for(
             "download",
@@ -252,6 +248,7 @@ def song():
             "quality": "320kbps MP3",
 
             "download_url": download_url
+
         })
 
     except Exception as e:
@@ -262,16 +259,26 @@ def song():
         }), 500
 
 
+# ========================================
+# FILE
+# ========================================
+
 @app.route("/file/<file_id>")
 def download(file_id):
 
     filepath = files.get(file_id)
 
-    if not filepath or not os.path.exists(filepath):
-
+    if not filepath:
         return jsonify({
             "success": False,
             "error": "File not found or expired"
+        }), 404
+
+    if not os.path.exists(filepath):
+
+        return jsonify({
+            "success": False,
+            "error": "File expired"
         }), 404
 
     return send_file(
@@ -282,20 +289,20 @@ def download(file_id):
     )
 
 
+# ========================================
+# LOCAL SERVER
+# ========================================
+
 if __name__ == "__main__":
 
     print("=" * 50)
     print("Song API")
     print("=" * 50)
 
-    if FFMPEG_LOCATION:
-        print("FFmpeg:", FFMPEG_LOCATION)
-    else:
-        print("WARNING: FFmpeg NOT FOUND")
-
-    print("Audio: MP3 320kbps")
-    print("Thumbnail: Maximum available")
-    print("Server: http://127.0.0.1:5000")
+    print(
+        "FFmpeg:",
+        FFMPEG_PATH if FFMPEG_AVAILABLE else "NOT FOUND"
+    )
 
     print("=" * 50)
 
