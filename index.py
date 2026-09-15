@@ -44,7 +44,6 @@ def search_music_api():
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
-        'cookiefile': 'cookies.txt',
     }
 
     try:
@@ -98,7 +97,6 @@ def tumble_music_api():
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
-        'cookiefile': 'cookies.txt',
     }
 
     try:
